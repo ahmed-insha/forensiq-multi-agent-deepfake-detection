@@ -1,0 +1,9 @@
+checkpoints/
+*.pt
+*.pth
+Forensiq_Data/
+*.flac
+*.mp4
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
