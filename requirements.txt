@@ -2,6 +2,7 @@ streamlit
 torch
 torchvision
 transformers
+scikit-image
 opencv-python-headless
 huggingface_hub
 langgraph
