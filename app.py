@@ -1,13 +1,12 @@
-
 """
 app.py
 
-ForensiQ Streamlit application -- final version incorporating every
-validated improvement: Phase C audio, collision-proof structural
-loading, confidence-weighted fusion with inconclusive-verdict logic,
-full-duration audio/video scoring, duration-based verdict reporting,
-transition-point evidence extraction, and the validated two-detector
-Image Agent fusion (+17.15 points, 974-sample evaluation).
+ForensiQ Streamlit application -- deployment-ready version. Model
+checkpoints are downloaded from Hugging Face Hub on first run (and
+cached locally afterward), rather than read from a personal Google
+Drive path, so this runs on Streamlit Community Cloud, Hugging Face
+Spaces, or any other host, not only inside the author's own Colab
+session.
 """
 import os
 import sys
@@ -20,13 +19,21 @@ import importlib.util
 import streamlit as st
 import torch
 import cv2
+from huggingface_hub import hf_hub_download
 
-CODE_DIR = "/content/drive/MyDrive/MDX Data Science & AI/THESIS Project/ForensiQ/Forensiq_Code"
-sys.path.append(CODE_DIR)
+# ============================================================
+# Hugging Face Hub checkpoint repo -- set once, used everywhere below
+# ============================================================
+HF_CHECKPOINT_REPO = "insha142/forensiq-checkpoints"
+
+def get_checkpoint(filename):
+    """Downloads a checkpoint from Hugging Face Hub, caching it locally
+    after the first download so app restarts don't re-download."""
+    return hf_hub_download(repo_id=HF_CHECKPOINT_REPO, filename=filename)
 
 
 def _load_mvssnet_module():
-    repo_path = "/content/mvssnet_repo"
+    repo_path = "/tmp/mvssnet_repo"
     models_dir = f"{repo_path}/models"
     mvssnet_file = f"{models_dir}/mvssnet.py"
 
@@ -56,21 +63,23 @@ def _load_mvssnet_module():
 def load_all_agents():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # --- Audio Agent ---
     from forensiq.models.audio_model import Wav2Vec2SpoofClassifier
     audio_model = Wav2Vec2SpoofClassifier(freeze_feature_extractor=True)
-    audio_model.load_state_dict(torch.load(f"{CODE_DIR}/checkpoints/audio_phase_c_best.pt", map_location="cpu"))
+    audio_ckpt = get_checkpoint("audio_phase_c_best.pt")
+    audio_model.load_state_dict(torch.load(audio_ckpt, map_location="cpu"))
     audio_model.to(device); audio_model.eval()
 
+    # --- Video Agent ---
     from forensiq.models.video_model import EfficientNetFrameClassifier
     video_model = EfficientNetFrameClassifier(freeze_backbone=False)
-    video_model.load_state_dict(torch.load(f"{CODE_DIR}/checkpoints/video_phase_a_best.pt", map_location="cpu"))
+    video_ckpt = get_checkpoint("video_phase_a_best.pt")
+    video_model.load_state_dict(torch.load(video_ckpt, map_location="cpu"))
     video_model.to(device); video_model.eval()
 
+    # --- Structural Agent (MVSS-Net) ---
     mvssnet_module = _load_mvssnet_module()
     get_mvss = mvssnet_module.get_mvss
-
-    os.makedirs("/content/mvssnet_repo/ckpt", exist_ok=True)
-    subprocess.run(["rsync", "-a", f"{CODE_DIR}/checkpoints/mvssnet_pretrained/", "/content/mvssnet_repo/ckpt/"])
 
     import numpy as np
     if not hasattr(np, 'sctypes'):
@@ -81,21 +90,23 @@ def load_all_agents():
         }
 
     mvssnet_model = get_mvss(backbone='resnet50', pretrained_base=True, nclass=1, sobel=True, constrain=True, n_input=3)
-    mvssnet_model.load_state_dict(torch.load("/content/mvssnet_repo/ckpt/mvssnet_casia.pt", map_location='cpu'), strict=True)
+    mvssnet_ckpt = get_checkpoint("mvssnet_pretrained/mvssnet_casia.pt")
+    mvssnet_model.load_state_dict(torch.load(mvssnet_ckpt, map_location='cpu'), strict=True)
     mvssnet_model.to(device); mvssnet_model.eval()
 
     from forensiq.models.interframe_detector import (
         compute_frame_features, compute_self_similarity_matrix, find_duplicated_blocks_adaptive,
     )
 
-    shutil.rmtree("/content/univfd_repo", ignore_errors=True)
-    subprocess.run(["git", "clone", "https://github.com/WisconsinAIVision/UniversalFakeDetect.git", "/content/univfd_repo"])
+    # --- Image Agent (UnivFD) -- weights come from UnivFD's own repo, not our checkpoint store ---
+    shutil.rmtree("/tmp/univfd_repo", ignore_errors=True)
+    subprocess.run(["git", "clone", "https://github.com/WisconsinAIVision/UniversalFakeDetect.git", "/tmp/univfd_repo"])
     try:
         import ftfy, regex
     except ImportError:
         subprocess.run(["pip", "install", "ftfy", "regex", "--quiet"])
     from forensiq.models.image_model import load_univfd_model
-    univfd_model = load_univfd_model("/content/univfd_repo/pretrained_weights/fc_weights.pth", device=device)
+    univfd_model = load_univfd_model("/tmp/univfd_repo/pretrained_weights/fc_weights.pth", device=device)
 
     from torchvision import transforms
     from torchvision.models import EfficientNet_B0_Weights
@@ -134,7 +145,7 @@ with st.sidebar:
     else:
         st.warning("Image Agent: using plain UnivFD only (add a key above for the validated +17-point improvement)")
 
-with st.spinner("Loading specialist agents (first run only, may take a few minutes)..."):
+with st.spinner("Loading specialist agents (first run only downloads checkpoints, may take a few minutes)..."):
     models, device = load_all_agents()
     models["gemini_api_key"] = gemini_api_key if gemini_api_key else None
 
