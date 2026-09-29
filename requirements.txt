@@ -13,5 +13,4 @@ scipy
 numpy
 Pillow
 setuptools
-albumentations==0.4.6
-imgaug
+
