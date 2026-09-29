@@ -105,6 +105,10 @@ def load_all_agents():
         import ftfy, regex
     except ImportError:
         subprocess.run(["pip", "install", "ftfy", "regex", "--quiet"])
+
+    if "/tmp/univfd_repo" not in sys.path:
+    sys.path.append("/tmp/univfd_repo")
+    
     from forensiq.models.image_model import load_univfd_model
     univfd_model = load_univfd_model("/tmp/univfd_repo/pretrained_weights/fc_weights.pth", device=device)
 
