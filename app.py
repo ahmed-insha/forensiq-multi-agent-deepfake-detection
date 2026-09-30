@@ -123,6 +123,11 @@ def load_all_agents():
 
     if "/tmp/univfd_repo" not in sys.path:
         sys.path.append("/tmp/univfd_repo")
+
+
+    import forensiq.models.image_model as image_model_module
+    image_model_module.CLIP_CACHE_DIR = "/tmp/clip_cache"
+    os.makedirs("/tmp/clip_cache", exist_ok=True)
     
     from forensiq.models.image_model import load_univfd_model
     univfd_model = load_univfd_model("/tmp/univfd_repo/pretrained_weights/fc_weights.pth", device=device)
