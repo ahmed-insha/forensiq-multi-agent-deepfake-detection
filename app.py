@@ -21,6 +21,12 @@ import torch
 import cv2
 from huggingface_hub import hf_hub_download
 
+import packaging as _packaging
+if "pkg_resources" not in sys.modules:
+    fake_pkg_resources = pytypes.ModuleType("pkg_resources")
+    fake_pkg_resources.packaging = _packaging
+    sys.modules["pkg_resources"] = fake_pkg_resources
+
 # ============================================================
 # Hugging Face Hub checkpoint repo -- set once, used everywhere below
 # ============================================================
