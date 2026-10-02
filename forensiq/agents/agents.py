@@ -95,14 +95,15 @@ def run_structural_agent(mvssnet_model, interframe_funcs, frame_path, video_path
     import cv2
 
     import sys, types as pytypes
-    if "albumentations" not in sys.modules:
-      fake_albumentations = pytypes.ModuleType("albumentations")
-      fake_albumentations.pytorch = pytypes.ModuleType("albumentations.pytorch")
-      fake_albumentations.pytorch.functional = pytypes.ModuleType("albumentations.pytorch.functional")
-      sys.modules["albumentations"] = fake_albumentations
-      sys.modules["albumentations.pytorch"] = fake_albumentations.pytorch
-      sys.modules["albumentations.pytorch.functional"] = fake_albumentations.pytorch.functional
-  
+
+    fake_albumentations = pytypes.ModuleType("albumentations")
+    fake_albumentations.pytorch = pytypes.ModuleType("albumentations.pytorch")
+    fake_albumentations.pytorch.functional = pytypes.ModuleType("albumentations.pytorch.functional")
+    sys.modules["albumentations"] = fake_albumentations
+    sys.modules["albumentations.pytorch"] = fake_albumentations.pytorch
+    sys.modules["albumentations.pytorch.functional"] = fake_albumentations.pytorch.functional
+
+
     from common.tools import inference_single
 
     
