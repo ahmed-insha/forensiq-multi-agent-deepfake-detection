@@ -28,19 +28,89 @@ Full methodology, results, and limitations are documented in the dissertation re
 ## Repository Structure
 
 ```text
-forensiq/
-  agents/       Orchestrator, per-modality agent logic, image fusion
-  models/       Model architecture definitions
-  data/         Dataset loaders and degradation protocol
-  app.py        Streamlit application entry point
-  checkpoints/  Not included, see Model Weights below
+forensiq-multi-agent-deepfake-detection/
+├── app.py                                   Streamlit application entry point
+├── requirements.txt
+├── Dockerfile
+├── README.md
+├── LICENSE
+├── .gitignore
+│
+├── forensiq/
+│   ├── __init__.py
+│   ├── config.py                            Paths, constants shared across the project
+│   │
+│   ├── agents/
+│   │   ├── agents.py                        Unified per-agent interface (run_audio_agent, run_video_agent, etc.)
+│   │   ├── orchestrator.py                  LangGraph orchestration + fusion logic
+│   │   ├── image_fusion.py                  Calibrated UnivFD + Gemini fusion (validated, +17pp)
+│   │   ├── video_fusion.py                  Video fusion re-test (tested, not integrated)
+│   │   ├── dual_video_agent.py
+│   │   ├── localization.py                  Sliding-window / frame scoring, timeline building
+│   │   ├── report_summary.py                Clear-summary generation for the app
+│   │   └── narration.py                     Gemini-based grounded narration
+│   │
+│   ├── models/
+│   │   ├── audio_model.py                   Wav2Vec2SpoofClassifier
+│   │   ├── video_model.py                   EfficientNetFrameClassifier
+│   │   ├── image_model.py                   UnivFD model wrapper
+│   │   ├── interframe_detector.py           Self-similarity frame-duplication detector
+│   │   ├── interframe_motion_detector.py
+│   │   ├── frequency_detector.py            Frequency-domain detector (tested, rejected)
+│   │   └── temporal_consistency.py          Optical-flow jitter signal (tested, rejected)
+│   │
+│   ├── data/
+│   │   ├── degradation.py                   DeeperForensics-1.0 degradation protocol
+│   │   ├── image_degradation.py
+│   │   └── datasets/
+│   │       ├── asvspoof.py
+│   │       ├── asvspoof_keys_cache.json
+│   │       ├── asvspoof_validation_cache.json
+│   │       ├── audio_holdout_keys.json
+│   │       ├── audio_phase_b_dataset.py
+│   │       ├── build_audio_phase_b.py
+│   │       ├── build_phase_b_data.py
+│   │       ├── build_synthetic_timeline_testset.py
+│   │       ├── faceforensics.py
+│   │       ├── fakeavceleb.py
+│   │       ├── htvd_clone_finetune.py
+│   │       ├── htvd_intraframe.py
+│   │       ├── image_gen_dataset.py
+│   │       └── validate_flac.py
+│   │
+│   ├── training/
+│   │   ├── __init__.py
+│   │   ├── trainer.py
+│   │   ├── search_audio.py                  Hyperparameter search (Audio)
+│   │   ├── search_video.py                  Hyperparameter search (Video)
+│   │   ├── train_audio.py                   Phase A
+│   │   ├── train_audio_phase_b.py
+│   │   ├── train_audio_phase_c.py           Class-weighted corrective fine-tune
+│   │   ├── train_video.py                   Phase A
+│   │   ├── train_video_phase_b.py
+│   │   └── finetune_mvssnet_clone.py        Structural Agent Clone fine-tune
+│   │
+│   ├── evaluation/
+│   │   ├── __init__.py
+│   │   ├── metrics.py
+│   │   ├── image_metrics.py
+│   │   ├── degradation_eval.py
+│   │   └── audio_degradation_eval.py
+│   │
+│   └── explainability/
+│       ├── __init__.py
+│       ├── gradcam.py
+│       ├── audio_explain.py
+│       └── image_explain.py
+│
+└── checkpoints/                             Not included, see Model Weights in README
 ```
 
 ## Model Weights
 
 The trained checkpoints are not included in this repository because of their file size. They are hosted separately on Hugging Face Hub:
 
-`[your HF checkpoint repo link here]`
+` https://huggingface.co/insha142/forensiq-checkpoints/tree/main`
 
 ## Running Locally
 
@@ -53,7 +123,7 @@ An optional Google Gemini API key can be entered in the application sidebar. Thi
 
 ## Live Demo
 
-'[]`
+` https://forensiq-multi-agent-deepfake-detection-1.onrender.com ` 
 
 ## License
 
