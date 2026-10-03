@@ -36,20 +36,20 @@ class OrchestratorState(TypedDict, total=False):
 
 def detect_and_prepare_node(state: OrchestratorState, models: dict, device) -> dict:
     import cv2
+    import tempfile
     path = state["input_path"]
     ext = os.path.splitext(path)[1].lower()
     update = {}
 
     if ext in [".mp4", ".mov", ".avi"]:
         update["input_type"] = "video"
-        audio_out = "/content/orchestrator_tmp_audio.wav"
+        audio_out = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
         os.system(f'ffmpeg -y -i "{path}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "{audio_out}" -loglevel error')
         update["audio_path"] = audio_out if os.path.exists(audio_out) else None
 
         cap = cv2.VideoCapture(path)
         frame_paths = []
-        frame_dir = "/content/orchestrator_tmp_frames"
-        os.makedirs(frame_dir, exist_ok=True)
+        frame_dir = tempfile.mkdtemp()
         idx = 0
         while True:
             ret, frame = cap.read()
@@ -72,7 +72,6 @@ def detect_and_prepare_node(state: OrchestratorState, models: dict, device) -> d
         update["input_type"] = "unknown"
 
     return update
-
 
 def audio_node(state: OrchestratorState, models: dict, device) -> dict:
     if state.get("audio_path"):
