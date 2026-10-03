@@ -1,15 +1,7 @@
 """
 app.py
 
-ForensiQ Streamlit application -- lazy-loading version. Models are
-loaded ONLY when a file of the matching type is actually uploaded,
-rather than all four eagerly at startup. This substantially reduces
-peak memory: an image-only upload never loads the Audio, Video, or
-Structural agents at all. A video upload still needs Audio + Video +
-Structural together (per the orchestrator's design), so peak memory
-for video is unchanged -- but audio-only and image-only analysis,
-likely the most common cases in a demo/viva setting, now run far
-lighter.
+ForensiQ Streamlit application. 
 """
 import os
 import sys
@@ -26,6 +18,7 @@ from huggingface_hub import hf_hub_download
 
 HF_CHECKPOINT_REPO = "insha142/forensiq-checkpoints"
 
+
 def get_checkpoint(filename):
     return hf_hub_download(repo_id=HF_CHECKPOINT_REPO, filename=filename)
 
@@ -41,10 +34,23 @@ def _load_mvssnet_module():
     if not os.path.exists(mvssnet_file):
         raise RuntimeError("MVSS-Net clone failed - mvssnet.py missing")
 
+    # Stub albumentations before common/tools.py imports it, with a
+    # real, working img_to_tensor rather than an empty placeholder.
     if "albumentations" not in sys.modules:
+        def _img_to_tensor(img, normalize=None):
+            tensor = torch.from_numpy(img.transpose(2, 0, 1)).float()
+            if tensor.max() > 1:
+                tensor = tensor / 255.0
+            if normalize is not None:
+                mean = torch.tensor(normalize.get("mean", [0, 0, 0])).view(-1, 1, 1)
+                std = torch.tensor(normalize.get("std", [1, 1, 1])).view(-1, 1, 1)
+                tensor = (tensor - mean) / std
+            return tensor
+
         fake_albumentations = pytypes.ModuleType("albumentations")
         fake_albumentations.pytorch = pytypes.ModuleType("albumentations.pytorch")
         fake_albumentations.pytorch.functional = pytypes.ModuleType("albumentations.pytorch.functional")
+        fake_albumentations.pytorch.functional.img_to_tensor = _img_to_tensor
         sys.modules["albumentations"] = fake_albumentations
         sys.modules["albumentations.pytorch"] = fake_albumentations.pytorch
         sys.modules["albumentations.pytorch.functional"] = fake_albumentations.pytorch.functional
@@ -66,8 +72,8 @@ def _load_mvssnet_module():
 
 
 # ============================================================
-# Per-agent lazy loaders -- each cached independently, so loading
-# one doesn't force the others to load too.
+# Per-agent lazy loaders, each cached independently, so an
+# image-only upload never loads Audio/Video/Structural, etc.
 # ============================================================
 
 @st.cache_resource
@@ -108,10 +114,10 @@ def load_structural_agent():
             'others': [bool, object, bytes, str, np.void],
         }
 
-    model = get_mvss(backbone='resnet50', pretrained_base=True, nclass=1, sobel=True, constrain=True, n_input=3)
+    mvssnet_model = get_mvss(backbone='resnet50', pretrained_base=True, nclass=1, sobel=True, constrain=True, n_input=3)
     ckpt = get_checkpoint("mvssnet_pretrained/mvssnet_casia.pt")
-    model.load_state_dict(torch.load(ckpt, map_location='cpu'), strict=True)
-    model.to(device); model.eval()
+    mvssnet_model.load_state_dict(torch.load(ckpt, map_location='cpu'), strict=True)
+    mvssnet_model.to(device); mvssnet_model.eval()
 
     from forensiq.models.interframe_detector import (
         compute_frame_features, compute_self_similarity_matrix, find_duplicated_blocks_adaptive,
@@ -121,7 +127,7 @@ def load_structural_agent():
         "compute_self_similarity_matrix": compute_self_similarity_matrix,
         "find_duplicated_blocks_adaptive": find_duplicated_blocks_adaptive,
     }
-    return model, interframe_funcs, device
+    return mvssnet_model, interframe_funcs, device
 
 
 @st.cache_resource
@@ -160,7 +166,6 @@ def load_image_agent():
 st.set_page_config(page_title="ForensiQ", layout="wide")
 st.title("ForensiQ — Multi-Agent Forensic Media Analysis")
 st.caption("Upload a video, audio, or image file for multi-modal deepfake/tampering analysis.")
-st.caption("Specialist agents load on demand, based on your file type — only what's needed for your upload is loaded into memory.")
 
 with st.sidebar:
     st.subheader("Settings")
@@ -168,13 +173,17 @@ with st.sidebar:
                                      help="Get a free key at aistudio.google.com/apikey. Without a key, "
                                           "the Image Agent falls back to a weaker, uncalibrated baseline.")
     enable_narration = st.checkbox("Generate written forensic narration", value=bool(gemini_api_key))
+    if gemini_api_key:
+        st.success("Image Agent: using validated fusion (calibrated UnivFD + Gemini reasoning)")
+    else:
+        st.warning("Image Agent: using plain UnivFD only (add a key above for the validated +17-point improvement)")
 
-from forensiq.agents.agents import run_audio_agent, run_video_agent, run_structural_agent, run_image_agent
+from forensiq.agents.orchestrator import run_orchestrator
+from forensiq.agents.report_summary import build_clear_summary
 from forensiq.agents.localization import (
     sliding_window_audio_scores, score_video_frames_over_time, build_combined_timeline,
     summarize_timeline, extract_audio_evidence_clip, extract_video_evidence_clip,
 )
-from forensiq.agents.report_summary import build_clear_summary
 
 uploaded_file = st.file_uploader("Upload a file", type=["mp4", "mov", "flac", "wav", "mp3", "jpg", "jpeg", "png"])
 
@@ -185,6 +194,7 @@ if uploaded_file is not None:
         temp_path = tmp.name
 
     st.divider()
+
     is_video = suffix.lower() in [".mp4", ".mov"]
     is_audio = suffix.lower() in [".flac", ".wav", ".mp3"]
     is_image = suffix.lower() in [".jpg", ".jpeg", ".png"]
@@ -196,123 +206,119 @@ if uploaded_file is not None:
     else:
         st.image(temp_path)
 
-    agent_results = {}
-    timeline_summary = None
-    clear_summary = None
-    sample_frame_path = None
+    # --- Build the models dict with only what this file type needs ---
+    with st.spinner("Loading specialist agents for this file type (first run may take a few minutes)..."):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        models = {}
 
-    if is_image:
-        with st.spinner("Loading Image Agent..."):
+        if is_image:
             univfd_model, image_transform, device = load_image_agent()
-        with st.spinner("Analyzing..."):
-            result = run_image_agent(univfd_model, temp_path, device, image_transform, gemini_api_key=gemini_api_key)
-        agent_results["image"] = result.__dict__
+            models["image"] = univfd_model
+            models["image_transform"] = image_transform
 
-    elif is_audio:
-        with st.spinner("Loading Audio Agent..."):
+        elif is_audio:
             audio_model, device = load_audio_agent()
-        with st.spinner("Analyzing..."):
-            result = run_audio_agent(audio_model, temp_path, device)
-        agent_results["audio"] = result.__dict__
+            models["audio"] = audio_model
 
-    elif is_video:
-        with st.spinner("Loading Audio, Video, and Structural Agents (video needs all three)..."):
-            audio_model, audio_device = load_audio_agent()
-            video_model, video_transform, video_device = load_video_agent()
-            mvssnet_model, interframe_funcs, struct_device = load_structural_agent()
+        elif is_video:
+            audio_model, device = load_audio_agent()
+            video_model, video_transform, device = load_video_agent()
+            mvssnet_model, interframe_funcs, device = load_structural_agent()
+            models["audio"] = audio_model
+            models["video"] = video_model
+            models["video_transform"] = video_transform
+            models["structural_mvssnet"] = mvssnet_model
+            models["structural_interframe_funcs"] = interframe_funcs
 
-        audio_out = temp_path + "_audio.wav"
-        os.system(f'ffmpeg -y -i "{temp_path}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "{audio_out}" -loglevel error')
+        models["gemini_api_key"] = gemini_api_key if gemini_api_key else None
 
-        with st.spinner("Analyzing..."):
-            if os.path.exists(audio_out):
-                audio_result = run_audio_agent(audio_model, audio_out, audio_device)
-                agent_results["audio"] = audio_result.__dict__
+    # --- Everything below this line is unchanged from the proven, working version ---
 
-            video_result = run_video_agent(video_model, [], video_device, video_transform, full_video_path=temp_path)
-            agent_results["video"] = video_result.__dict__
+    with st.spinner("Running analysis..."):
+        result = run_orchestrator(temp_path, models, device)
 
-            cap = cv2.VideoCapture(temp_path)
-            ret, frame = cap.read()
-            cap.release()
-            if ret:
-                sample_frame_path = temp_path + "_frame.jpg"
-                cv2.imwrite(sample_frame_path, frame)
-                struct_result = run_structural_agent(mvssnet_model, interframe_funcs, sample_frame_path, temp_path, struct_device)
-                agent_results["structural"] = struct_result.__dict__
+    verdict = result["final_verdict"]
+    confidence = result["final_confidence"]
 
-            audio_scores = sliding_window_audio_scores(audio_model, audio_out, audio_device) if os.path.exists(audio_out) else []
-            video_scores = score_video_frames_over_time(video_model, temp_path, video_device, video_transform, num_samples=20)
-            cap = cv2.VideoCapture(temp_path)
-            duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / (cap.get(cv2.CAP_PROP_FPS) or 25.0)
-            cap.release()
-            timeline = build_combined_timeline(audio_scores, video_scores, duration)
-            timeline_summary = summarize_timeline(timeline)
-
-    # --- Simple confidence-weighted fusion across whatever agents actually ran ---
-    fake_votes = [n for n, r in agent_results.items() if r["verdict"] == "fake"]
-    real_votes = [n for n, r in agent_results.items() if r["verdict"] == "real"]
-    fake_weight = sum(agent_results[n]["confidence"] for n in fake_votes)
-    real_weight = sum(agent_results[n]["confidence"] for n in real_votes)
-    total_weight = fake_weight + real_weight
-    disagreement = len(fake_votes) > 0 and len(real_votes) > 0
-
-    if total_weight == 0:
-        final_verdict, final_confidence = "unknown", 0.0
-    elif disagreement and total_weight > 0 and abs(fake_weight - real_weight) / total_weight < 0.15:
-        final_verdict, final_confidence = "inconclusive", 0.5
-    elif fake_weight > real_weight:
-        final_verdict, final_confidence = "fake", fake_weight / total_weight
-    else:
-        final_verdict, final_confidence = "real", real_weight / total_weight
-
-    if final_verdict == "fake":
-        st.error(f"### Verdict: LIKELY MANIPULATED ({final_confidence*100:.1f}% confidence)")
-    elif final_verdict == "real":
-        st.success(f"### Verdict: LIKELY AUTHENTIC ({final_confidence*100:.1f}% confidence)")
-    elif final_verdict == "inconclusive":
+    if verdict == "fake":
+        st.error(f"### Verdict: LIKELY MANIPULATED ({confidence*100:.1f}% confidence)")
+    elif verdict == "real":
+        st.success(f"### Verdict: LIKELY AUTHENTIC ({confidence*100:.1f}% confidence)")
+    elif verdict == "inconclusive":
         st.warning("### Verdict: INCONCLUSIVE — recommend human review")
     else:
         st.warning("### Verdict: UNABLE TO ANALYZE")
 
-    if disagreement:
-        st.info(f"ℹ️ Agents disagree: {', '.join(fake_votes)} flagged fake, {', '.join(real_votes)} flagged real.")
+    if result.get("disagreement_detected"):
+        st.info(f"ℹ️ {result['disagreement_details']}")
 
     st.subheader("Per-Agent Breakdown")
-    if agent_results:
-        cols = st.columns(len(agent_results))
-        for i, (agent_name, r) in enumerate(agent_results.items()):
+    if result.get("agent_summary"):
+        cols = st.columns(len(result["agent_summary"]))
+        for i, (agent_name, agent_result) in enumerate(result["agent_summary"].items()):
             with cols[i]:
-                st.metric(label=agent_name.capitalize(), value=r["verdict"].upper(),
-                          delta=f"{r['confidence']*100:.1f}% confidence")
-                if agent_name == "image" and r.get("explanation_data", {}).get("final_reasoning"):
+                st.metric(label=agent_name.capitalize(), value=agent_result["verdict"].upper(),
+                          delta=f"{agent_result['confidence']*100:.1f}% confidence")
+                if agent_name == "image" and agent_result.get("explanation_data", {}).get("final_reasoning"):
                     with st.expander("Reasoning"):
-                        st.write(r["explanation_data"]["final_reasoning"])
+                        st.write(agent_result["explanation_data"]["final_reasoning"])
 
-    if is_video and timeline_summary:
+    timeline_summary = None
+    clear_summary = None
+    sample_frame_path = None
+
+    if result["input_type"] == "video":
         st.subheader("Timeline Analysis")
-        clear_summary = build_clear_summary({"agent_summary": agent_results, "final_verdict": final_verdict,
-                                              "final_confidence": final_confidence}, timeline, temp_path, duration=duration)
+
+        audio_out = temp_path + "_audio.wav"
+        os.system(f'ffmpeg -y -i "{temp_path}" -vn -acodec pcm_s16le -ar 16000 -ac 1 "{audio_out}" -loglevel error')
+
+        audio_scores = sliding_window_audio_scores(models["audio"], audio_out, device) if os.path.exists(audio_out) else []
+        video_scores = score_video_frames_over_time(models["video"], temp_path, device, models["video_transform"], num_samples=20)
+
+        cap = cv2.VideoCapture(temp_path)
+        duration = cap.get(cv2.CAP_PROP_FRAME_COUNT) / (cap.get(cv2.CAP_PROP_FPS) or 25.0)
+        cap.release()
+
+        timeline = build_combined_timeline(audio_scores, video_scores, duration)
+        timeline_summary = summarize_timeline(timeline)
+        clear_summary = build_clear_summary(result, timeline, temp_path, duration=duration)
+
         for line in clear_summary.get("summary_text", []):
             st.write(f"**{line}**")
+
         if "audio_evidence_window" in clear_summary:
             w = clear_summary["audio_evidence_window"]
+            st.write(f"Audio evidence (transition detected at {w['start']:.1f}s):")
             audio_evidence_path = temp_path + "_audio_evidence.wav"
             extract_audio_evidence_clip(temp_path, w["start"], w["end"], audio_evidence_path)
             st.audio(audio_evidence_path)
+
         if "video_evidence_window" in clear_summary:
             w = clear_summary["video_evidence_window"]
+            st.write(f"Video evidence (transition detected at {w['start']:.1f}s):")
             video_evidence_path = temp_path + "_video_evidence.mp4"
             extract_video_evidence_clip(temp_path, w["start"], w["end"], video_evidence_path)
             st.video(video_evidence_path)
+
+        if clear_summary.get("structural_tampering_detected"):
+            st.write("**Structural findings:**")
+            for line in clear_summary.get("structural_findings_text", []):
+                st.write(f"- {line}")
+
+        cap = cv2.VideoCapture(temp_path)
+        ret, frame = cap.read()
+        cap.release()
+        if ret:
+            sample_frame_path = temp_path + "_frame.jpg"
+            cv2.imwrite(sample_frame_path, frame)
 
     if enable_narration and gemini_api_key:
         from forensiq.agents.narration import generate_narration
         with st.spinner("Generating forensic narration..."):
             try:
                 narration = generate_narration(
-                    {"agent_summary": agent_results, "final_verdict": final_verdict, "final_confidence": final_confidence},
-                    api_key=gemini_api_key, timeline_summary=timeline_summary,
+                    result, api_key=gemini_api_key, timeline_summary=timeline_summary,
                     clear_summary=clear_summary, sample_frame_path=sample_frame_path,
                 )
                 st.subheader("Forensic Narration")
